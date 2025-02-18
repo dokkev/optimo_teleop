@@ -27,16 +27,16 @@ target_include_directories(teleop_node PUBLIC
 )
 
 # Build twist_converter executable
-# add_executable(twist_converter src/twist_converter.cpp)
-# ament_target_dependencies(twist_converter rclcpp std_msgs sensor_msgs optimo_msgs optimo_api)
-# target_include_directories(twist_converter PUBLIC
-#   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-#   $<INSTALL_INTERFACE:include>
-# )
+add_executable(twist_converter src/twist_converter.cpp)
+ament_target_dependencies(twist_converter rclcpp std_msgs sensor_msgs optimo_msgs optimo_api)
+target_include_directories(twist_converter PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 
 install(TARGETS
   teleop_node
-  # twist_converter
+  twist_converter
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY include/ DESTINATION include)
