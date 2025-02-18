@@ -17,6 +17,8 @@
   <depend>std_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>optimo_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>optimo_api</depend>
   <exec_depend>ros2launch</exec_depend>
 
   <export>
