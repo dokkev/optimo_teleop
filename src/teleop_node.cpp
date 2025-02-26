@@ -1,101 +1,112 @@
-
 #include "optimo_teleop/teleop_node.hpp"
 
 #include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/pose_stamped.hpp"
+#include "geometry_msgs/msg/twist_stamped.hpp"
 #include "optimo_msgs/msg/pose_elbow.hpp"
-#include "optimo_msgs/srv/servo_cb.hpp"
+
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.h"
 
 #include <chrono>
 #include <functional>
-#include <vector>
+#include <mutex>
 
 using namespace std::chrono_literals;
 
 OptimoTeleop::OptimoTeleop(const rclcpp::NodeOptions & options)
 : Node("optimo_teleop", options)
 {
-  // Subscribe to a PoseStamped topic.
-  pose_subscriber_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-    "/optimo/ee_pose_desired", 10,
-    std::bind(&OptimoTeleop::pose_callback, this, std::placeholders::_1));
+    // Subscribe to current end-effector pose
+    current_pose_subscriber_ = this->create_subscription<optimo_msgs::msg::PoseElbow>(
+        "/optimo/ee_pose_current", 10,
+        std::bind(&OptimoTeleop::current_pose_callback, this, std::placeholders::_1));
 
-  // Publisher to send the converted PoseElbow messages.
-  pose_pub_ = this->create_publisher<optimo_msgs::msg::PoseElbow>("/optimo/servo/ee_pose_desired", 10);
+    // Subscribe to twist-based input for controlling the end-effector
+    twist_subscriber_ = this->create_subscription<geometry_msgs::msg::TwistStamped>(
+        "/optimo/servo/twist_cmd", 10,
+        std::bind(&OptimoTeleop::twist_callback, this, std::placeholders::_1));
 
-  // Create the service client for the servo_cb service.
-  servo_client_ = this->create_client<optimo_msgs::srv::ServoCb>("/optimo/optimo_effort_controller/servo_cb");
+    // Publisher to send adjusted PoseElbow messages
+    pose_pub_ = this->create_publisher<optimo_msgs::msg::PoseElbow>("/optimo/servo/ee_pose_desired", 10);
 
-  // Set up a one-shot timer to call the servo_cb service after 2 seconds.
-  service_timer_ = this->create_wall_timer(
-    2s, std::bind(&OptimoTeleop::call_servo_service, this));
-
-  RCLCPP_INFO(this->get_logger(), "OptimoTeleop node initialized");
+    RCLCPP_INFO(this->get_logger(), "OptimoTeleop node initialized.");
 }
 
 OptimoTeleop::~OptimoTeleop()
 {
 }
 
-void OptimoTeleop::pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
+void OptimoTeleop::current_pose_callback(const optimo_msgs::msg::PoseElbow::SharedPtr msg)
 {
-  // Store the received pose.
-  last_pose_ = *msg;
+    std::lock_guard<std::mutex> lock(pose_mutex_);
+    current_pose_ = *msg;
 
-  // Convert PoseStamped to PoseElbow.
-  optimo_msgs::msg::PoseElbow target;
-  target.pose = msg->pose;
-  // Set a default elbow angle (could be modified as needed).
-  target.elbow_angle = 0.0;
-
-  // Publish the target PoseElbow.
-  pose_pub_->publish(target);
-
-  RCLCPP_INFO(this->get_logger(), "Published PoseElbow target from PoseStamped");
+    if (!initialized_)
+    {
+        desired_pose_ = current_pose_;
+        initialized_ = true;
+    }
 }
 
-void OptimoTeleop::call_servo_service()
+void OptimoTeleop::twist_callback(const geometry_msgs::msg::TwistStamped::SharedPtr msg)
 {
-  // Cancel the timer so that we only call the service once.
-  service_timer_->cancel();
+    std::lock_guard<std::mutex> lock(pose_mutex_);
 
-  // Wait for the servo_cb service to become available.
-  while (!servo_client_->wait_for_service(1s)) {
-    if (!rclcpp::ok()) {
-      RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for servo_cb service");
-      return;
+    if (!initialized_)
+    {
+        RCLCPP_WARN(this->get_logger(), "Desired pose not initialized yet.");
+        return;
     }
-    RCLCPP_INFO(this->get_logger(), "Waiting for servo_cb service to become available...");
-  }
 
-  // Create and populate the service request.
-  auto request = std::make_shared<optimo_msgs::srv::ServoCb::Request>();
-  request->duration = 10;  // For example, 10 seconds.
-  // Specify the topic name that carries the PoseElbow messages.
-  request->topic_name = "servo_target_pose";
-  request->cartesian = true;  // Activate Cartesian servo mode.
+    // Update position using linear twist components.
+    desired_pose_.pose.position.x += position_scale_ * msg->twist.linear.x;
+    desired_pose_.pose.position.y += position_scale_ * msg->twist.linear.y;
+    desired_pose_.pose.position.z += position_scale_ * msg->twist.linear.z;
 
-  RCLCPP_INFO(this->get_logger(), "Calling servo_cb with topic '%s'", request->topic_name.c_str());
+    // Update orientation using angular twist components.
+    // Convert current orientation to tf2 quaternion.
+    // tf2::Quaternion q;
+    // tf2::fromMsg(desired_pose_.pose.orientation, q);
 
-  // Call the service and wait for the result.
-  auto future_result = servo_client_->async_send_request(request);
-  try {
-    auto response = future_result.get();
-    if (response->success) {
-      RCLCPP_INFO(this->get_logger(), "servo_cb service call succeeded, servo mode activated");
-    } else {
-      RCLCPP_ERROR(this->get_logger(), "servo_cb service call failed");
-    }
-  } catch (const std::exception & e) {
-    RCLCPP_ERROR(this->get_logger(), "Service call to servo_cb failed: %s", e.what());
-  }
+    // Compute incremental rotation from twist angular values.
+    // The orientation_scale_ factor determines the sensitivity of the angular update.
+    // double delta_roll  = orientation_scale_ * msg->twist.angular.x;
+    // double delta_pitch = orientation_scale_ * msg->twist.angular.y;
+    // double delta_yaw   = orientation_scale_ * msg->twist.angular.z;
+
+    // // Create a quaternion representing the incremental rotation.
+    // tf2::Quaternion dq;
+    // dq.setRPY(delta_roll, delta_pitch, delta_yaw);
+
+    // // Update the current orientation by applying the incremental rotation.
+    // q = dq * q;
+    // q.normalize();  // Ensure the quaternion remains normalized.
+
+    // // Convert back to a geometry_msgs quaternion.
+    // desired_pose_.pose.orientation = tf2::toMsg(q);
+
+    // set desired orientation to current orientation
+    desired_pose_.pose.orientation = current_pose_.pose.orientation;
+
+
+    desired_pose_.elbow_angle = 0.0;
+    
+    // Publish the updated desired PoseElbow.
+    pose_pub_->publish(desired_pose_);
+
+    RCLCPP_INFO(this->get_logger(), "Published adjusted PoseElbow: [%.2f, %.2f, %.2f] (timestamp: %d.%d)",
+                desired_pose_.pose.position.x, desired_pose_.pose.position.y, desired_pose_.pose.position.z,
+                msg->header.stamp.sec, msg->header.stamp.nanosec);
 }
 
 int main(int argc, char ** argv)
 {
-  rclcpp::init(argc, argv);
-  auto node = std::make_shared<OptimoTeleop>();
-  rclcpp::spin(node);
-  rclcpp::shutdown();
-  return 0;
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<OptimoTeleop>();
+
+    // Process subscriber callbacks
+    rclcpp::spin(node);
+
+    rclcpp::shutdown();
+    return 0;
 }
